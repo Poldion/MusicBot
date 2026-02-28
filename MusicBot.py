@@ -4,9 +4,9 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
-import yt_dlp # NEW
-from collections import deque # NEW
-import asyncio # NEW
+import yt_dlp
+from collections import deque
+import asyncio
 
 # Environment variables for tokens and other sensitive data
 load_dotenv()
@@ -20,9 +20,43 @@ SONG_QUEUES = {}
 # Lautstärke-Variable (0 bis 100, Standard: 100)
 volume = 100
 
+# YT-DLP Options for searching (fast, no streaming URL)
+YDL_SEARCH_OPTIONS = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "nocheckcertificate": True,
+    "ignoreerrors": False,
+    "logtostderr": False,
+    "quiet": True,
+    "no_warnings": True,
+    "extract_flat": "in_playlist",
+    "default_search": "auto",
+    "source_address": "0.0.0.0",
+}
+
+# YT-DLP Options for playing (get streaming URL)
+YDL_PLAY_OPTIONS = {
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "nocheckcertificate": True,
+    "ignoreerrors": False,
+    "logtostderr": False,
+    "quiet": True,
+    "no_warnings": True,
+    "source_address": "0.0.0.0",
+    "cachedir": False,
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "ios"]
+        }
+    }
+}
+
+
 async def search_ytdlp_async(query, ydl_opts):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: _extract(query, ydl_opts))
+
 
 def _extract(query, ydl_opts):
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -35,6 +69,7 @@ intents.message_content = True
 
 # Bot setup
 bot = commands.Bot(command_prefix="!", intents=intents)
+
 
 # Bot ready-up code
 @bot.event
@@ -53,7 +88,6 @@ async def on_ready():
 
 @bot.tree.command(name="skip", description="Skips the current playing song")
 async def skip(interaction: discord.Interaction):
-    # Kurzoperation, hier reicht eine direkte Antwort ohne defer
     voice_client = discord.utils.get(bot.voice_clients, guild=interaction.guild)
     if not isinstance(voice_client, discord.VoiceClient):
         await interaction.response.send_message("Not playing anything to skip.")
@@ -67,7 +101,6 @@ async def skip(interaction: discord.Interaction):
 
 @bot.tree.command(name="pause", description="Pause the currently playing song.")
 async def pause(interaction: discord.Interaction):
-    # Kurzoperation, direkte Antwort ist okay
     voice_client = discord.utils.get(bot.voice_clients, guild=interaction.guild)
     if not isinstance(voice_client, discord.VoiceClient):
         await interaction.response.send_message("I'm not in a voice channel.")
@@ -81,7 +114,6 @@ async def pause(interaction: discord.Interaction):
 
 @bot.tree.command(name="resume", description="Resume the currently paused song.")
 async def resume(interaction: discord.Interaction):
-    # Kurzoperation, direkte Antwort ist okay
     voice_client = discord.utils.get(bot.voice_clients, guild=interaction.guild)
     if not isinstance(voice_client, discord.VoiceClient):
         await interaction.response.send_message("I'm not in a voice channel.")
@@ -95,12 +127,7 @@ async def resume(interaction: discord.Interaction):
 
 @bot.tree.command(name="stop", description="Stop playback and clear the queue.")
 async def stop(interaction: discord.Interaction):
-    # Antwort direkt zu Beginn deferren, damit Discord die Interaktion als "in Bearbeitung" markiert
-    if hasattr(interaction.response, 'defer'):
-        await interaction.response.defer()
-    else:
-        await interaction.defer()
-
+    await interaction.response.defer()
     voice_client = discord.utils.get(bot.voice_clients, guild=interaction.guild)
     if not isinstance(voice_client, discord.VoiceClient) or not voice_client.is_connected():
         await interaction.followup.send("I'm not connected to any voice channel.")
@@ -109,11 +136,12 @@ async def stop(interaction: discord.Interaction):
     guild_id_str = str(interaction.guild_id)
     if guild_id_str in SONG_QUEUES:
         SONG_QUEUES[guild_id_str].clear()
-
+    
     if voice_client.is_playing() or voice_client.is_paused():
         voice_client.stop()
-
-    await voice_client.disconnect(force=False)
+    else:
+        await voice_client.disconnect()
+        
     await interaction.followup.send("Stopped playback and disconnected!")
 
 
@@ -133,34 +161,43 @@ async def play(interaction: discord.Interaction, song_query: str):
         voice_client = await voice_channel.connect()
     elif voice_channel != voice_client.channel:
         await voice_client.move_to(voice_channel)
-    ydl_options = {
-        "format": "bestaudio[abr<=96]/bestaudio",
-        "noplaylist": True,
-        "youtube_include_dash_manifest": False,
-        "youtube_include_hls_manifest": False,
-    }
+
     # Prüfen, ob der Query ein YouTube-Link ist
     if any(domain in song_query for domain in ["youtube.com", "youtu.be"]):
-        query = song_query  # Direktlink verwenden
+        query = song_query
     else:
-        query = "ytsearch1: " + song_query  # Suchbegriff verwenden
-    results = await search_ytdlp_async(query, ydl_options)
+        query = "ytsearch1: " + song_query
+
+    # Use SEARCH options first to get the video ID/URL quickly
+    # This avoids the "Requested format is not available" error during the initial search phase
+    results = await search_ytdlp_async(query, YDL_SEARCH_OPTIONS)
+
     tracks = results.get("entries", []) if "entries" in results else [results] if results else []
     if not tracks:
         await interaction.followup.send("No results found.")
         return
     first_track = tracks[0]
-    audio_url = first_track["url"]
+
+    webpage_url = first_track.get("webpage_url") or first_track.get("url")
     title = first_track.get("title", "Untitled")
     guild_id = str(interaction.guild_id)
+
     if SONG_QUEUES.get(guild_id) is None:
         SONG_QUEUES[guild_id] = deque()
-    SONG_QUEUES[guild_id].append((audio_url, title))
+
+    # Store info dict if we pre-extracted it, otherwise None
+    song_data = {
+        "webpage_url": webpage_url,
+        "title": title,
+        "info": None  # Always fetch fresh info before playing
+    }
+    SONG_QUEUES[guild_id].append(song_data)
+
     if voice_client.is_playing() or voice_client.is_paused():
         await interaction.followup.send(f"Added to queue: **{title}**")
     else:
-        await interaction.followup.send(f"Now playing: **{title}**")
-        await play_next_song(voice_client, guild_id, interaction.channel)
+        await interaction.followup.send(f"Now playing: **{title}** (Volume: {volume}%)")
+        await play_next_song(voice_client, guild_id, interaction.channel, announce=False)
 
 
 @bot.tree.command(name="playnow", description="Spielt einen Song sofort und unterbricht die aktuelle Wiedergabe.")
@@ -179,49 +216,89 @@ async def playnow(interaction: discord.Interaction, song_query: str):
         voice_client = await voice_channel.connect()
     elif voice_channel != voice_client.channel:
         await voice_client.move_to(voice_channel)
-    ydl_options = {
-        "format": "bestaudio[abr<=96]/bestaudio",
-        "noplaylist": True,
-        "youtube_include_dash_manifest": False,
-        "youtube_include_hls_manifest": False,
-    }
-    # Prüfen, ob der Query ein YouTube-Link ist
+
     if any(domain in song_query for domain in ["youtube.com", "youtu.be"]):
         query = song_query
     else:
         query = "ytsearch1: " + song_query
-    results = await search_ytdlp_async(query, ydl_options)
+
+    # Use SEARCH options first to get the video ID/URL quickly
+    results = await search_ytdlp_async(query, YDL_SEARCH_OPTIONS)
     tracks = results.get("entries", []) if "entries" in results else [results] if results else []
     if not tracks:
         await interaction.followup.send("No results found.")
         return
     first_track = tracks[0]
-    audio_url = first_track["url"]
+
+    webpage_url = first_track.get("webpage_url") or first_track.get("url")
     title = first_track.get("title", "Untitled")
     guild_id = str(interaction.guild_id)
-    # Song an den Anfang der Queue stellen, ohne die Queue zu leeren
-    SONG_QUEUES.setdefault(guild_id, deque()).appendleft((audio_url, title))
-    # Aktuelle Wiedergabe sofort stoppen
+
+    song_data = {
+        "webpage_url": webpage_url,
+        "title": title,
+        "info": None  # Always fetch fresh info before playing
+    }
+
+    # Add to front of queue with pre-extracted info
+    SONG_QUEUES.setdefault(guild_id, deque()).appendleft(song_data)
+
+    await interaction.followup.send(f"Now playing immediately: **{title}** (Volume: {volume}%)")
+
     if voice_client.is_playing() or voice_client.is_paused():
-        voice_client.stop()
-    await interaction.followup.send(f"Now playing immediately: **{title}**")
-    await play_next_song(voice_client, guild_id, interaction.channel)
+        voice_client.stop()  # This triggers after_play -> play_next_song
+    else:
+        await play_next_song(voice_client, guild_id, interaction.channel, announce=False)
 
 
-async def play_next_song(voice_client, guild_id, channel):
+async def play_next_song(voice_client, guild_id, channel, announce=True):
     global volume
     if SONG_QUEUES[guild_id]:
-        audio_url, title = SONG_QUEUES[guild_id].popleft()
+        song_data = SONG_QUEUES[guild_id].popleft()
+        webpage_url = song_data["webpage_url"]
+        title = song_data["title"]
+        info = song_data.get("info")
 
-        # FFmpeg erwartet den Wert als Dezimalzahl (1.0 = 100%)
+        try:
+            # Only extract if we don't have the info already
+            if not info:
+                # Use PLAY options here to get the actual streaming URL
+                info = await search_ytdlp_async(webpage_url, YDL_PLAY_OPTIONS)
+                if "entries" in info:
+                    info = info["entries"][0]
+
+            audio_url = info["url"]
+            print(f"Playing {title} from {audio_url}")
+        except Exception as e:
+            print(f"Error extracting {title}: {e}")
+            await channel.send(f"Could not play **{title}**. Skipping...")
+            # Recursively call to play next
+            await play_next_song(voice_client, guild_id, channel)
+            return
+
         ffmpeg_volume = volume / 100
+
+        ffmpeg_before_options = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+
+        # Pass HTTP headers to ffmpeg to avoid 403
+        if "http_headers" in info:
+            headers_list = []
+            for key, value in info["http_headers"].items():
+                headers_list.append(f"{key}: {value}")
+            headers_str = "\r\n".join(headers_list)
+
+            if headers_str:
+                headers_str += "\r\n"
+                # Escape quotes for command line
+                headers_str = headers_str.replace('"', '\\"')
+                ffmpeg_before_options += f" -headers \"{headers_str}\""
+
         ffmpeg_options = {
-            "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-            "options": f"-vn -c:a libopus -b:a 96k -filter:a volume={ffmpeg_volume}"
+            "before_options": ffmpeg_before_options,
+            "options": f"-vn -b:a 96k -filter:a volume={ffmpeg_volume}"
         }
 
-        # Im Docker-Container (Linux) liegt ffmpeg im PATH, daher kein Windows-spezifischer Pfad
-        source = discord.FFmpegOpusAudio(audio_url, **ffmpeg_options, executable="ffmpeg")
+        source = discord.FFmpegOpusAudio(audio_url, **ffmpeg_options, executable="bin\\ffmpeg\\ffmpeg.exe")
 
         def after_play(error):
             if error:
@@ -229,23 +306,26 @@ async def play_next_song(voice_client, guild_id, channel):
             asyncio.run_coroutine_threadsafe(play_next_song(voice_client, guild_id, channel), bot.loop)
 
         voice_client.play(source, after=after_play)
-        asyncio.create_task(channel.send(f"Now playing: **{title}** (Volume: {volume}%)"))
+        if announce:
+            asyncio.create_task(channel.send(f"Now playing: **{title}** (Volume: {volume}%)"))
     else:
-        await voice_client.disconnect()
+        if voice_client.is_connected():
+            await voice_client.disconnect()
         SONG_QUEUES[guild_id] = deque()
+
 
 # Slash-Command zum Setzen der Lautstärke (0 bis 100)
 @bot.tree.command(name="volume", description="Setzt die Lautstärke (0 bis 100, Standard: 100)")
 @app_commands.describe(value="Neue Lautstärke (z.B. 50 für 50%)")
 async def set_volume(interaction: discord.Interaction, value: int):
     global volume
-    # Volume-Change ist eine sehr schnelle Operation, direkte Antwort reicht
     if value < 0 or value > 100:
         await interaction.response.send_message("Bitte gib einen Wert zwischen 0 und 100 an.", ephemeral=True)
         return
     volume = value
     await interaction.response.send_message(
         f"Lautstärke wurde auf {volume}% gesetzt. Die Änderung wirkt ab dem nächsten Song.", ephemeral=True)
+
 
 print("Starte Bot...")
 try:
