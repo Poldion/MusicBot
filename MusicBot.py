@@ -298,7 +298,10 @@ async def play_next_song(voice_client, guild_id, channel, announce=True):
             "options": f"-vn -b:a 96k -filter:a volume={ffmpeg_volume}"
         }
 
-        source = discord.FFmpegOpusAudio(audio_url, **ffmpeg_options, executable="bin\\ffmpeg\\ffmpeg.exe")
+        # In Docker (Linux), ffmpeg is in the PATH, so we don't need to specify the executable path.
+        # If running locally on Windows, we might need it, but for Docker compatibility, we remove it.
+        # discord.py will find ffmpeg automatically if it's installed in the system.
+        source = discord.FFmpegOpusAudio(audio_url, **ffmpeg_options)
 
         def after_play(error):
             if error:
