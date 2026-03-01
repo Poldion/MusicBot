@@ -32,6 +32,7 @@ YDL_SEARCH_OPTIONS = {
     "extract_flat": "in_playlist",
     "default_search": "auto",
     "source_address": "0.0.0.0",
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 }
 
 # YT-DLP Options for playing (get streaming URL)
@@ -45,11 +46,7 @@ YDL_PLAY_OPTIONS = {
     "no_warnings": True,
     "source_address": "0.0.0.0",
     "cachedir": False,
-    "extractor_args": {
-        "youtube": {
-            "player_client": ["android", "ios"]
-        }
-    }
+    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 }
 
 
